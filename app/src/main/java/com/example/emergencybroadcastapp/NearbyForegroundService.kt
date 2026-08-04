@@ -8,10 +8,13 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
+import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.google.android.gms.nearby.Nearby
 import com.google.android.gms.nearby.connection.*
 import org.json.JSONObject
+import java.io.File
+import java.io.FileOutputStream
 import java.nio.charset.StandardCharsets
 import java.util.Collections
 import java.util.UUID
@@ -58,6 +61,7 @@ class NearbyForegroundService : Service() {
                 put("id", messageId)
                 put("type", "EMERGENCY_ALERT")
                 put("hops", 0)
+                put("timestamp", System.currentTimeMillis())
             }
             broadcastToAll(jsonPayload.toString())
         }
@@ -114,14 +118,23 @@ class NearbyForegroundService : Service() {
     }
 
     private fun handleIncomingMessage(rawJson: String) {
+        val receiveTime = System.currentTimeMillis()
         try {
             val json = JSONObject(rawJson)
             val msgId = json.getString("id")
             val currentHops = json.optInt("hops", 0)
+            val originalTimestamp = json.optLong("timestamp", -1L)
 
             // Ignore if already processed or exceeds 200 hops
             if (processedMessageIds.contains(msgId) || currentHops >= 200) {
                 return
+            }
+
+            // Calculate and log latency if timestamp exists
+            if (originalTimestamp != -1L) {
+                val latency = receiveTime - originalTimestamp
+                Log.d("MeshLatency", "Message $msgId received. Hops: $currentHops, Latency: ${latency}ms")
+                saveLatencyLog(msgId, currentHops, latency)
             }
 
             // Deduplicate: mark as received
@@ -133,6 +146,18 @@ class NearbyForegroundService : Service() {
 
         } catch (e: Exception) {
             e.printStackTrace()
+        }
+    }
+
+    private fun saveLatencyLog(msgId: String, hops: Int, latency: Long) {
+        try {
+            val logEntry = "ID: $msgId, Hops: $hops, Latency: ${latency}ms, Time: ${System.currentTimeMillis()}\n"
+            val file = File(filesDir, "mesh_latency_log.txt")
+            FileOutputStream(file, true).use {
+                it.write(logEntry.toByteArray())
+            }
+        } catch (e: Exception) {
+            Log.e("MeshLatency", "Failed to save log", e)
         }
     }
 

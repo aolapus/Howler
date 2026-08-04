@@ -1,10 +1,12 @@
 package com.example.emergencybroadcastapp
 
 import android.Manifest
+import android.app.AlertDialog
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
+import java.io.File
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
@@ -73,10 +75,27 @@ class MainActivity : ComponentActivity() {
                     modifier = Modifier.fillMaxSize(),
                     color = Color(0xFF121212)
                 ) {
-                    MainScreen(onEmergencyTriggered = { triggerEmergencyBroadcast() })
+                    MainScreen(
+                        onEmergencyTriggered = { triggerEmergencyBroadcast() },
+                        onViewLogs = { showLogs() }
+                    )
                 }
             }
         }
+    }
+
+    private fun showLogs() {
+        val file = File(filesDir, "mesh_latency_log.txt")
+        val logs = if (file.exists()) file.readText() else "No logs found."
+        
+        AlertDialog.Builder(this)
+            .setTitle("Mesh Network Logs")
+            .setMessage(logs)
+            .setPositiveButton("OK", null)
+            .setNeutralButton("Clear") { _, _ -> 
+                file.delete()
+            }
+            .show()
     }
 
     private fun startForegroundService() {
@@ -107,7 +126,7 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-fun MainScreen(onEmergencyTriggered: () -> Unit) {
+fun MainScreen(onEmergencyTriggered: () -> Unit, onViewLogs: () -> Unit) {
     var isHolding by remember { mutableStateOf(false) }
     var holdProgress by remember { mutableStateOf(0f) } // Fixed: Switched from floatStateOf to mutableStateOf
 
@@ -180,6 +199,15 @@ fun MainScreen(onEmergencyTriggered: () -> Unit) {
                     )
                 }
             }
+        }
+
+        Spacer(modifier = Modifier.height(20.dp))
+
+        Button(
+            onClick = onViewLogs,
+            colors = ButtonDefaults.buttonColors(containerColor = Color.DarkGray)
+        ) {
+            Text("View Latency Logs", color = Color.White)
         }
 
         Spacer(modifier = Modifier.height(40.dp))
