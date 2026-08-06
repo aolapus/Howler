@@ -4,17 +4,12 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
-import android.bluetooth.BluetoothAdapter
-import android.bluetooth.BluetoothManager
-import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
-import android.location.LocationManager
 import android.media.RingtoneManager
 import android.os.*
 import android.util.Log
 import androidx.core.app.NotificationCompat
-import androidx.core.location.LocationManagerCompat
 import com.google.android.gms.nearby.Nearby
 import com.google.android.gms.nearby.connection.*
 import org.json.JSONObject
@@ -23,16 +18,6 @@ import java.io.FileOutputStream
 import java.nio.charset.StandardCharsets
 import java.util.Collections
 import java.util.UUID
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.asStateFlow
-
-data class MeshStatus(
-    val isAdvertising: Boolean = false,
-    val isDiscovering: Boolean = false,
-    val isMeshActive: Boolean = false,
-    val peerCount: Int = 0,
-    val lastError: String? = null
-)
 
 class NearbyForegroundService : Service() {
 
@@ -43,25 +28,6 @@ class NearbyForegroundService : Service() {
 
     private val connectedEndpoints = mutableSetOf<String>()
     private val connectingEndpoints = mutableSetOf<String>()
-    private val localNodeName = "Node_" + UUID.randomUUID().toString().substring(0, 4)
-
-    companion object {
-        const val ACTION_START_MESH = "com.example.emergencybroadcastapp.ACTION_START_MESH"
-        const val ACTION_STOP_MESH = "com.example.emergencybroadcastapp.ACTION_STOP_MESH"
-
-        private val _status = MutableStateFlow(MeshStatus())
-        val status = _status.asStateFlow()
-    }
-
-    private fun updateStatus(
-        isAdvertising: Boolean = _status.value.isAdvertising,
-        isDiscovering: Boolean = _status.value.isDiscovering,
-        isMeshActive: Boolean = _status.value.isMeshActive,
-        peerCount: Int = connectedEndpoints.size,
-        lastError: String? = null
-    ) {
-        _status.value = MeshStatus(isAdvertising, isDiscovering, isMeshActive, peerCount, lastError)
-    }
     private val processedMessageIds = Collections.newSetFromMap(object : LinkedHashMap<String, Boolean>() {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Boolean>?): Boolean {
             return size > 1000
@@ -88,70 +54,30 @@ class NearbyForegroundService : Service() {
         }
 
         startAdvertisingAndDiscovery()
-        checkRadioStates()
-    }
-
-    private fun checkRadioStates() {
-        val bluetoothManager = getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
-        val bluetoothAdapter = bluetoothManager.adapter
-        if (bluetoothAdapter == null || !bluetoothAdapter.isEnabled) {
-            Log.e("MeshService", "CRITICAL: Bluetooth is OFF")
-            updateStatus(lastError = "Bluetooth is OFF")
-        }
-
-        val locationManager = getSystemService(Context.LOCATION_SERVICE) as LocationManager
-        if (!LocationManagerCompat.isLocationEnabled(locationManager)) {
-            Log.e("MeshService", "CRITICAL: Location is OFF")
-            updateStatus(lastError = "Location is OFF")
-        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        val action = intent?.action
-        when (action) {
-            "BROADCAST_EMERGENCY", "BROADCAST_NOTIFICATION" -> {
-                val messageId = UUID.randomUUID().toString()
-                val type = if (action == "BROADCAST_EMERGENCY") "EMERGENCY_ALERT" else "INFO_NOTIFICATION"
-                val jsonPayload = JSONObject().apply {
-                    put("id", messageId)
-                    put("type", type)
-                    put("originator", localNodeName)
-                    put("hops", 0)
-                    put("timestamp", System.currentTimeMillis())
-                }
-                processedMessageIds.add(messageId)
-                broadcastToAll(jsonPayload.toString())
+        if (intent?.action == "BROADCAST_EMERGENCY") {
+            val messageId = UUID.randomUUID().toString()
+            val jsonPayload = JSONObject().apply {
+                put("id", messageId)
+                put("type", "EMERGENCY_ALERT")
+                put("hops", 0)
+                put("timestamp", System.currentTimeMillis())
             }
-            ACTION_START_MESH -> {
-                startAdvertisingAndDiscovery()
-            }
-            ACTION_STOP_MESH -> {
-                stopMesh()
-            }
+            broadcastToAll(jsonPayload.toString())
         }
         return START_STICKY
-    }
-
-    private fun stopMesh() {
-        Nearby.getConnectionsClient(this).stopAdvertising()
-        Nearby.getConnectionsClient(this).stopDiscovery()
-        Nearby.getConnectionsClient(this).stopAllEndpoints()
-        connectedEndpoints.clear()
-        connectingEndpoints.clear()
-        Log.d("MeshService", "Mesh manually stopped")
-        updateStatus(isAdvertising = false, isDiscovering = false, isMeshActive = false)
     }
 
     private fun startAdvertisingAndDiscovery() {
         val options = AdvertisingOptions.Builder().setStrategy(STRATEGY).build()
         Nearby.getConnectionsClient(this).startAdvertising(
-            localNodeName, SERVICE_ID, connectionLifecycleCallback, options
+            "EmergencyNode", SERVICE_ID, connectionLifecycleCallback, options
         ).addOnSuccessListener {
-            Log.d("MeshService", "Advertising started as $localNodeName")
-            updateStatus(isAdvertising = true, isMeshActive = true)
+            Log.d("MeshService", "Advertising started successfully")
         }.addOnFailureListener { e ->
             Log.e("MeshService", "Advertising failed to start", e)
-            updateStatus(isAdvertising = false, lastError = "Adv Fail: ${e.message}")
         }
 
         val discoveryOptions = DiscoveryOptions.Builder().setStrategy(STRATEGY).build()
@@ -159,33 +85,24 @@ class NearbyForegroundService : Service() {
             SERVICE_ID, endpointDiscoveryCallback, discoveryOptions
         ).addOnSuccessListener {
             Log.d("MeshService", "Discovery started successfully")
-            updateStatus(isDiscovering = true, isMeshActive = true)
         }.addOnFailureListener { e ->
             Log.e("MeshService", "Discovery failed to start", e)
-            updateStatus(isDiscovering = false, lastError = "Disc Fail: ${e.message}")
         }
     }
 
     private val endpointDiscoveryCallback = object : EndpointDiscoveryCallback() {
         override fun onEndpointFound(endpointId: String, info: DiscoveredEndpointInfo) {
-            val remoteName = info.endpointName
-            Log.d("MeshService", "Endpoint found: $endpointId ($remoteName)")
+            Log.d("MeshService", "Endpoint found: $endpointId (${info.endpointName})")
             
-            // Collision Avoidance: Only the node with the lexicographically "higher" name initiates
-            // This prevents both nodes from requesting connection simultaneously.
-            val shouldInitiate = localNodeName > remoteName
-
-            if (shouldInitiate && !connectedEndpoints.contains(endpointId) && !connectingEndpoints.contains(endpointId)) {
-                Log.d("MeshService", "Initiating connection to $remoteName (Local: $localNodeName)")
+            // Basic collision avoidance: only initiate if we haven't already
+            if (!connectedEndpoints.contains(endpointId) && !connectingEndpoints.contains(endpointId)) {
                 connectingEndpoints.add(endpointId)
                 Nearby.getConnectionsClient(this@NearbyForegroundService)
-                    .requestConnection(localNodeName, endpointId, connectionLifecycleCallback)
+                    .requestConnection("EmergencyNode", endpointId, connectionLifecycleCallback)
                     .addOnFailureListener { e ->
                         connectingEndpoints.remove(endpointId)
                         Log.e("MeshService", "Request connection failed for $endpointId", e)
                     }
-            } else if (!shouldInitiate) {
-                Log.d("MeshService", "Waiting for $remoteName to initiate connection (Local: $localNodeName)")
             }
         }
 
@@ -209,17 +126,14 @@ class NearbyForegroundService : Service() {
             if (result.status.isSuccess) {
                 Log.d("MeshService", "Connected to $endpointId")
                 connectedEndpoints.add(endpointId)
-                updateStatus()
             } else {
                 Log.e("MeshService", "Connection failed with $endpointId: ${result.status}")
-                updateStatus(lastError = "Conn Failed: ${result.status.statusMessage}")
             }
         }
 
         override fun onDisconnected(endpointId: String) {
             Log.d("MeshService", "Disconnected from $endpointId")
             connectedEndpoints.remove(endpointId)
-            updateStatus()
         }
     }
 
@@ -239,28 +153,22 @@ class NearbyForegroundService : Service() {
         try {
             val json = JSONObject(rawJson)
             val msgId = json.getString("id")
-            val originator = json.optString("originator", "unknown")
-            val type = json.optString("type", "EMERGENCY_ALERT")
             val currentHops = json.optInt("hops", 0)
             val originalTimestamp = json.optLong("timestamp", -1L)
 
-            // Ignore if already processed, exceeds 200 hops, or if WE are the originator
-            if (processedMessageIds.contains(msgId) || currentHops >= 200 || originator == localNodeName) {
+            // Ignore if already processed or exceeds 200 hops
+            if (processedMessageIds.contains(msgId) || currentHops >= 200) {
                 return
             }
 
             // Calculate and log latency if timestamp exists
             if (originalTimestamp != -1L) {
                 val latency = receiveTime - originalTimestamp
-                Log.d("MeshLatency", "Message $msgId ($type) from $originator received. Hops: $currentHops, Latency: ${latency}ms")
+                Log.d("MeshLatency", "Message $msgId received. Hops: $currentHops, Latency: ${latency}ms")
                 saveLatencyLog(msgId, currentHops, latency)
                 
-                // TRIGGER ALARM or NOTIFICATION
-                if (type == "EMERGENCY_ALERT") {
-                    triggerEmergencyAlarm(msgId)
-                } else {
-                    showInfoNotification(msgId)
-                }
+                // TRIGGER ALARM
+                triggerEmergencyAlarm(msgId)
             }
 
             // Deduplicate: mark as received
@@ -273,18 +181,6 @@ class NearbyForegroundService : Service() {
         } catch (e: Exception) {
             e.printStackTrace()
         }
-    }
-
-    private fun showInfoNotification(msgId: String) {
-        val notification = NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("New Mesh Message")
-            .setContentText("A non-emergency broadcast was received: $msgId")
-            .setSmallIcon(android.R.drawable.stat_notify_chat)
-            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
-            .setAutoCancel(true)
-            .build()
-
-        getSystemService(NotificationManager::class.java)?.notify(msgId.hashCode(), notification)
     }
 
     private fun saveLatencyLog(msgId: String, hops: Int, latency: Long) {
@@ -303,15 +199,6 @@ class NearbyForegroundService : Service() {
         if (connectedEndpoints.isNotEmpty()) {
             val payload = Payload.fromBytes(data.toByteArray(StandardCharsets.UTF_8))
             Nearby.getConnectionsClient(this).sendPayload(connectedEndpoints.toList(), payload)
-                .addOnSuccessListener {
-                    Log.d("MeshService", "Payload sent to ${connectedEndpoints.size} peers")
-                }
-                .addOnFailureListener { e ->
-                    Log.e("MeshService", "Payload send failed", e)
-                    updateStatus(lastError = "Send Fail: ${e.message}")
-                }
-        } else {
-            Log.w("MeshService", "Attempted broadcast with 0 connected peers")
         }
     }
 
