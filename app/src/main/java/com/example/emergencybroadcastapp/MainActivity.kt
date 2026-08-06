@@ -77,7 +77,8 @@ class MainActivity : ComponentActivity() {
                 ) {
                     MainScreen(
                         onEmergencyTriggered = { triggerEmergencyBroadcast() },
-                        onViewLogs = { showLogs() }
+                        onViewLogs = { showLogs() },
+                        isServiceRunning = hasRequiredPermissions() // Simple proxy
                     )
                 }
             }
@@ -126,7 +127,7 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-fun MainScreen(onEmergencyTriggered: () -> Unit, onViewLogs: () -> Unit) {
+fun MainScreen(onEmergencyTriggered: () -> Unit, onViewLogs: () -> Unit, isServiceRunning: Boolean) {
     var isHolding by remember { mutableStateOf(false) }
     var holdProgress by remember { mutableStateOf(0f) } // Fixed: Switched from floatStateOf to mutableStateOf
 
@@ -154,15 +155,25 @@ fun MainScreen(onEmergencyTriggered: () -> Unit, onViewLogs: () -> Unit) {
         verticalArrangement = Arrangement.SpaceBetween
     ) {
         // 1. Red Circle Logo Placeholder (Top)
-        Box(
-            modifier = Modifier
-                .padding(top = 40.dp)
-                .size(100.dp)
-                .clip(CircleShape)
-                .background(Color.Red),
-            contentAlignment = Alignment.Center
-        ) {
-            Text("LOGO", color = Color.White, fontWeight = FontWeight.Bold)
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Box(
+                modifier = Modifier
+                    .padding(top = 40.dp)
+                    .size(100.dp)
+                    .clip(CircleShape)
+                    .background(Color.Red),
+                contentAlignment = Alignment.Center
+            ) {
+                Text("LOGO", color = Color.White, fontWeight = FontWeight.Bold)
+            }
+            
+            Spacer(modifier = Modifier.height(8.dp))
+            
+            Text(
+                text = if (isServiceRunning) "● Mesh Network Active" else "○ Waiting for permissions...",
+                color = if (isServiceRunning) Color(0xFF4CAF50) else Color.Gray,
+                fontSize = 14.sp
+            )
         }
 
         // 2. Large Centered Red Button (Hold 3s)
