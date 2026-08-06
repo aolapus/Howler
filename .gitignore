@@ -7,12 +7,10 @@
 /.idea/workspace.xml
 /.idea/navEditor.xml
 /.idea/assetWizardSettings.xml
-/.artifacts/
 .DS_Store
 /build
 /captures
 .externalNativeBuild
 .cxx
 local.properties
-
-/.artifacts/f53065c0-3bc4-430b-ae62-e49a3c155dd1/
+/.artifacts/

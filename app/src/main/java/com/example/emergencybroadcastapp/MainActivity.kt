@@ -11,10 +11,12 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.getValue
@@ -24,9 +26,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlinx.coroutines.delay
 
 class MainActivity : ComponentActivity() {
@@ -70,6 +74,8 @@ class MainActivity : ComponentActivity() {
         }
 
         setContent {
+            val meshStatus by NearbyForegroundService.status.collectAsStateWithLifecycle()
+            
             MaterialTheme {
                 Surface(
                     modifier = Modifier.fillMaxSize(),
@@ -77,8 +83,10 @@ class MainActivity : ComponentActivity() {
                 ) {
                     MainScreen(
                         onEmergencyTriggered = { triggerEmergencyBroadcast() },
+                        onInfoTriggered = { triggerInfoBroadcast() },
                         onViewLogs = { showLogs() },
-                        isServiceRunning = hasRequiredPermissions() // Simple proxy
+                        onToggleMesh = { active -> toggleMesh(active) },
+                        meshStatus = meshStatus
                     )
                 }
             }
@@ -115,6 +123,20 @@ class MainActivity : ComponentActivity() {
         startService(intent)
     }
 
+    private fun triggerInfoBroadcast() {
+        val intent = Intent(this, NearbyForegroundService::class.java).apply {
+            action = "BROADCAST_NOTIFICATION"
+        }
+        startService(intent)
+    }
+
+    private fun toggleMesh(active: Boolean) {
+        val intent = Intent(this, NearbyForegroundService::class.java).apply {
+            action = if (active) NearbyForegroundService.ACTION_START_MESH else NearbyForegroundService.ACTION_STOP_MESH
+        }
+        startService(intent)
+    }
+
     private fun requestRequiredPermissions() {
         permissionLauncher.launch(requiredPermissions)
     }
@@ -127,93 +149,91 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-fun MainScreen(onEmergencyTriggered: () -> Unit, onViewLogs: () -> Unit, isServiceRunning: Boolean) {
-    var isHolding by remember { mutableStateOf(false) }
-    var holdProgress by remember { mutableStateOf(0f) } // Fixed: Switched from floatStateOf to mutableStateOf
-
-    LaunchedEffect(isHolding) {
-        if (isHolding) {
-            val startTime = System.currentTimeMillis()
-            while (isHolding && holdProgress < 1f) {
-                val elapsed = System.currentTimeMillis() - startTime
-                holdProgress = (elapsed / 3000f).coerceAtMost(1f)
-                if (holdProgress >= 1f) {
-                    onEmergencyTriggered()
-                }
-                delay(16) // ~60fps UI update
-            }
-        } else {
-            holdProgress = 0f
-        }
-    }
-
+fun MainScreen(
+    onEmergencyTriggered: () -> Unit,
+    onInfoTriggered: () -> Unit,
+    onViewLogs: () -> Unit,
+    onToggleMesh: (Boolean) -> Unit,
+    meshStatus: MeshStatus
+) {
     Column(
         modifier = Modifier
             .fillMaxSize()
             .padding(24.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.SpaceBetween
+        horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        // 1. Red Circle Logo Placeholder (Top)
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Box(
+        // 1. Status Section (Top)
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            modifier = Modifier.padding(top = 40.dp)
+        ) {
+            Image(
+                painter = painterResource(id = R.drawable.howler_logo),
+                contentDescription = "Howler Logo",
                 modifier = Modifier
-                    .padding(top = 40.dp)
                     .size(100.dp)
                     .clip(CircleShape)
-                    .background(Color.Red),
-                contentAlignment = Alignment.Center
-            ) {
-                Text("LOGO", color = Color.White, fontWeight = FontWeight.Bold)
-            }
-            
+            )
+
             Spacer(modifier = Modifier.height(8.dp))
+
+            StatusRow("Advertising", meshStatus.isAdvertising)
+            StatusRow("Discovery", meshStatus.isDiscovering)
             
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.padding(vertical = 4.dp)
+            ) {
+                Text(text = "Mesh Receiver", color = Color.White, fontSize = 14.sp)
+                Spacer(modifier = Modifier.width(8.dp))
+                Switch(
+                    checked = meshStatus.isMeshActive,
+                    onCheckedChange = onToggleMesh,
+                    colors = SwitchDefaults.colors(
+                        checkedThumbColor = Color(0xFF4CAF50),
+                        checkedTrackColor = Color(0xFF4CAF50).copy(alpha = 0.5f)
+                    )
+                )
+            }
+
             Text(
-                text = if (isServiceRunning) "● Mesh Network Active" else "○ Waiting for permissions...",
-                color = if (isServiceRunning) Color(0xFF4CAF50) else Color.Gray,
-                fontSize = 14.sp
+                text = "Connected Peers: ${meshStatus.peerCount}",
+                color = if (meshStatus.peerCount > 0) Color(0xFF4CAF50) else Color.Gray,
+                fontSize = 12.sp
+            )
+            meshStatus.lastError?.let { error ->
+                Text(
+                    text = "Error: $error",
+                    color = Color.Red,
+                    fontSize = 10.sp
+                )
+            }
+        }
+
+        // 2. Button Section (Center)
+        Column(
+            modifier = Modifier.weight(1f),
+            verticalArrangement = Arrangement.Center,
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            HoldToBroadcastButton(
+                text = "BROADCAST\nEMERGENCY",
+                color = Color.Red,
+                activeColor = Color(0xFFB71C1C),
+                onTriggered = onEmergencyTriggered
+            )
+
+            Spacer(modifier = Modifier.height(24.dp))
+
+            HoldToBroadcastButton(
+                text = "SEND INFO\nNOTIFICATION",
+                color = Color(0xFF1B5E20),
+                activeColor = Color(0xFF1B3E20),
+                onTriggered = onInfoTriggered
             )
         }
 
-        // 2. Large Centered Red Button (Hold 3s)
-        Box(
-            modifier = Modifier
-                .size(240.dp)
-                .clip(CircleShape)
-                .background(if (isHolding) Color(0xFFB71C1C) else Color.Red)
-                .pointerInput(Unit) {
-                    detectTapGestures(
-                        onPress = {
-                            isHolding = true
-                            tryAwaitRelease()
-                            isHolding = false
-                        }
-                    )
-                },
-            contentAlignment = Alignment.Center
-        ) {
-            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                Text(
-                    text = if (holdProgress >= 1f) "SENT!" else "BROADCAST\nEMERGENCY",
-                    color = Color.White,
-                    fontSize = 20.sp,
-                    fontWeight = FontWeight.Bold,
-                    lineHeight = 24.sp
-                )
-                if (isHolding && holdProgress < 1f) {
-                    Spacer(modifier = Modifier.height(12.dp))
-                    Text(
-                        text = "${(3 - (holdProgress * 3)).toInt() + 1}s",
-                        color = Color.White,
-                        fontSize = 18.sp
-                    )
-                }
-            }
-        }
-
-        Spacer(modifier = Modifier.height(20.dp))
-
+        // 3. Footer Section (Bottom)
         Button(
             onClick = onViewLogs,
             colors = ButtonDefaults.buttonColors(containerColor = Color.DarkGray)
@@ -222,5 +242,84 @@ fun MainScreen(onEmergencyTriggered: () -> Unit, onViewLogs: () -> Unit, isServi
         }
 
         Spacer(modifier = Modifier.height(40.dp))
+    }
+}
+
+@Composable
+fun HoldToBroadcastButton(
+    text: String,
+    color: Color,
+    activeColor: Color,
+    onTriggered: () -> Unit
+) {
+    var isHolding by remember { mutableStateOf(false) }
+    var holdProgress by remember { mutableStateOf(0f) }
+
+    LaunchedEffect(isHolding) {
+        if (isHolding) {
+            val startTime = System.currentTimeMillis()
+            while (isHolding && holdProgress < 1f) {
+                val elapsed = System.currentTimeMillis() - startTime
+                holdProgress = (elapsed / 3000f).coerceAtMost(1f)
+                if (holdProgress >= 1f) {
+                    onTriggered()
+                }
+                delay(16)
+            }
+        } else {
+            holdProgress = 0f
+        }
+    }
+
+    Box(
+        modifier = Modifier
+            .width(280.dp)
+            .height(140.dp)
+            .clip(RoundedCornerShape(24.dp))
+            .background(if (isHolding) activeColor else color)
+            .pointerInput(Unit) {
+                detectTapGestures(
+                    onPress = {
+                        isHolding = true
+                        tryAwaitRelease()
+                        isHolding = false
+                    }
+                )
+            },
+        contentAlignment = Alignment.Center
+    ) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Text(
+                text = if (holdProgress >= 1f) "SENT!" else text,
+                color = Color.White,
+                fontSize = 18.sp,
+                fontWeight = FontWeight.Bold,
+                lineHeight = 22.sp,
+                textAlign = androidx.compose.ui.text.style.TextAlign.Center
+            )
+            if (isHolding && holdProgress < 1f) {
+                Spacer(modifier = Modifier.height(8.dp))
+                LinearProgressIndicator(
+                    progress = holdProgress,
+                    modifier = Modifier.width(100.dp),
+                    color = Color.White,
+                    trackColor = Color.White.copy(alpha = 0.3f)
+                )
+            }
+        }
+    }
+}
+
+@Composable
+fun StatusRow(label: String, active: Boolean) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Box(
+            modifier = Modifier
+                .size(8.dp)
+                .clip(CircleShape)
+                .background(if (active) Color(0xFF4CAF50) else Color.Gray)
+        )
+        Spacer(modifier = Modifier.width(6.dp))
+        Text(text = label, color = Color.LightGray, fontSize = 12.sp)
     }
 }
