@@ -73,8 +73,8 @@ class NearbyForegroundService : Service() {
         createNotificationChannel()
 
         val notification = createNotification(
-            "Emergency Service Active",
-            "Listening for emergency mesh network..."
+            "Howler Active",
+            "Please do not close the app."
         )
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
@@ -110,7 +110,7 @@ class NearbyForegroundService : Service() {
         val action = intent?.action
         when (action) {
             "BROADCAST_EMERGENCY", "BROADCAST_NOTIFICATION" -> {
-                val messageId = UUID.randomUUID().toString()
+                val messageId = UUID.randomUUID().toString().substring(0, 8).uppercase()
                 val type = if (action == "BROADCAST_EMERGENCY") "EMERGENCY_ALERT" else "INFO_NOTIFICATION"
                 val jsonPayload = JSONObject().apply {
                     put("id", messageId)
@@ -171,8 +171,8 @@ class NearbyForegroundService : Service() {
             val remoteName = info.endpointName
             Log.d("MeshService", "Endpoint found: $endpointId ($remoteName)")
             
-            // Collision Avoidance: Only the node with the lexicographically "higher" name initiates
-            // This prevents both nodes from requesting connection simultaneously.
+            //  Only one node initiates
+            // stops  both nodes from requesting connection at da same ttime
             val shouldInitiate = localNodeName > remoteName
 
             if (shouldInitiate && !connectedEndpoints.contains(endpointId) && !connectingEndpoints.contains(endpointId)) {
@@ -277,8 +277,8 @@ class NearbyForegroundService : Service() {
 
     private fun showInfoNotification(msgId: String) {
         val notification = NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("New Mesh Message")
-            .setContentText("A non-emergency broadcast was received: $msgId")
+            .setContentTitle("New Message")
+            .setContentText("A new message was received.")
             .setSmallIcon(android.R.drawable.stat_notify_chat)
             .setPriority(NotificationCompat.PRIORITY_DEFAULT)
             .setAutoCancel(true)
@@ -356,7 +356,7 @@ class NearbyForegroundService : Service() {
         // 3. Show High-Priority Notification
         val notification = NotificationCompat.Builder(this, ALERT_CHANNEL_ID)
             .setContentTitle("EMERGENCY ALERT RECEIVED")
-            .setContentText("A mesh broadcast message was received: $msgId")
+            .setContentText("An emergency message was received.")
             .setSmallIcon(android.R.drawable.stat_sys_warning)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setDefaults(Notification.DEFAULT_ALL)

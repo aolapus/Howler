@@ -1,22 +1,30 @@
 package com.example.emergencybroadcastapp
 
 import android.Manifest
-import android.app.AlertDialog
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
+import android.widget.Toast
 import java.io.File
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Menu
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.getValue
@@ -27,11 +35,17 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlinx.coroutines.delay
+
+enum class AppScreen {
+    MAIN,
+    LOGS
+}
 
 class MainActivity : ComponentActivity() {
 
@@ -79,13 +93,15 @@ class MainActivity : ComponentActivity() {
             MaterialTheme {
                 Surface(
                     modifier = Modifier.fillMaxSize(),
-                    color = Color(0xFF121212)
+                    color = Color.White
                 ) {
-                    MainScreen(
+                    MainApp(
                         onEmergencyTriggered = { triggerEmergencyBroadcast() },
                         onInfoTriggered = { triggerInfoBroadcast() },
-                        onViewLogs = { showLogs() },
                         onToggleMesh = { active -> toggleMesh(active) },
+                        onReadLogs = { readLogs() },
+                        onExportLogs = { exportLogs() },
+                        onClearLogs = { clearLogs() },
                         meshStatus = meshStatus
                     )
                 }
@@ -93,18 +109,36 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun showLogs() {
+    private fun readLogs(): String {
         val file = File(filesDir, "mesh_latency_log.txt")
-        val logs = if (file.exists()) file.readText() else "No logs found."
-        
-        AlertDialog.Builder(this)
-            .setTitle("Mesh Network Logs")
-            .setMessage(logs)
-            .setPositiveButton("OK", null)
-            .setNeutralButton("Clear") { _, _ -> 
-                file.delete()
+        return if (file.exists() && file.length() > 0) file.readText() else "No logs found."
+    }
+
+    private fun clearLogs() {
+        val file = File(filesDir, "mesh_latency_log.txt")
+        if (file.exists()) {
+            file.delete()
+        }
+        Toast.makeText(this, "Logs cleared", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun exportLogs() {
+        val file = File(filesDir, "mesh_latency_log.txt")
+        if (!file.exists() || file.length() == 0L) {
+            Toast.makeText(this, "No logs to export", Toast.LENGTH_SHORT).show()
+            return
+        }
+        try {
+            val uri = FileProvider.getUriForFile(this, "$packageName.fileprovider", file)
+            val shareIntent = Intent(Intent.ACTION_SEND).apply {
+                type = "text/plain"
+                putExtra(Intent.EXTRA_STREAM, uri)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             }
-            .show()
+            startActivity(Intent.createChooser(shareIntent, "Export Logs"))
+        } catch (e: Exception) {
+            Toast.makeText(this, "Failed to export logs: ${e.message}", Toast.LENGTH_LONG).show()
+        }
     }
 
     private fun startForegroundService() {
@@ -149,10 +183,119 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-fun MainScreen(
+fun MainApp(
     onEmergencyTriggered: () -> Unit,
     onInfoTriggered: () -> Unit,
-    onViewLogs: () -> Unit,
+    onToggleMesh: (Boolean) -> Unit,
+    onReadLogs: () -> String,
+    onExportLogs: () -> Unit,
+    onClearLogs: () -> Unit,
+    meshStatus: MeshStatus
+) {
+    var currentScreen by remember { mutableStateOf(AppScreen.MAIN) }
+    var menuExpanded by remember { mutableStateOf(false) }
+    var logsContent by remember { mutableStateOf("") }
+
+    val refreshLogs = {
+        logsContent = onReadLogs()
+    }
+
+    Column(
+        modifier = Modifier.fillMaxSize(),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        // 1. Top Navigation Bar with Centered Logo & Right Hamburger Menu
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(64.dp)
+                .background(Color(0xFF63AE73)),
+            contentAlignment = Alignment.Center
+        ) {
+            Image(
+                painter = painterResource(id = R.drawable.howler_logo),
+                contentDescription = "Howler Logo",
+                modifier = Modifier
+                    .size(48.dp)
+                    .clip(CircleShape)
+            )
+
+            // Right-aligned Hamburger Menu
+            Box(
+                modifier = Modifier
+                    .fillMaxHeight()
+                    .align(Alignment.CenterEnd)
+                    .padding(end = 8.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                IconButton(onClick = { menuExpanded = true }) {
+                    Icon(
+                        imageVector = Icons.Default.Menu,
+                        contentDescription = "Menu",
+                        tint = Color.White
+                    )
+                }
+
+                DropdownMenu(
+                    expanded = menuExpanded,
+                    onDismissRequest = { menuExpanded = false }
+                ) {
+                    DropdownMenuItem(
+                        text = { Text("View Logs") },
+                        onClick = {
+                            menuExpanded = false
+                            refreshLogs()
+                            currentScreen = AppScreen.LOGS
+                        }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Export Logs") },
+                        onClick = {
+                            menuExpanded = false
+                            onExportLogs()
+                        }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Clear Logs") },
+                        onClick = {
+                            menuExpanded = false
+                            onClearLogs()
+                            refreshLogs()
+                        }
+                    )
+                }
+            }
+        }
+
+        // Screen Body Content
+        when (currentScreen) {
+            AppScreen.MAIN -> {
+                MainDashboardScreen(
+                    onEmergencyTriggered = onEmergencyTriggered,
+                    onInfoTriggered = onInfoTriggered,
+                    onToggleMesh = onToggleMesh,
+                    meshStatus = meshStatus
+                )
+            }
+            AppScreen.LOGS -> {
+                LogsScreen(
+                    logs = logsContent,
+                    onBack = { currentScreen = AppScreen.MAIN },
+                    onExport = onExportLogs,
+                    onClear = {
+                        onClearLogs()
+                        refreshLogs()
+                    }
+                )
+            }
+        }
+    }
+}
+
+@Composable
+fun MainDashboardScreen(
+    onEmergencyTriggered: () -> Unit,
+    onInfoTriggered: () -> Unit,
     onToggleMesh: (Boolean) -> Unit,
     meshStatus: MeshStatus
 ) {
@@ -162,21 +305,11 @@ fun MainScreen(
             .padding(24.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        // 1. Status Section (Top)
+        // Status Section
         Column(
             horizontalAlignment = Alignment.CenterHorizontally,
-            modifier = Modifier.padding(top = 40.dp)
+            modifier = Modifier.padding(top = 16.dp)
         ) {
-            Image(
-                painter = painterResource(id = R.drawable.howler_logo),
-                contentDescription = "Howler Logo",
-                modifier = Modifier
-                    .size(100.dp)
-                    .clip(CircleShape)
-            )
-
-            Spacer(modifier = Modifier.height(8.dp))
-
             StatusRow("Advertising", meshStatus.isAdvertising)
             StatusRow("Discovery", meshStatus.isDiscovering)
             
@@ -184,7 +317,7 @@ fun MainScreen(
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier.padding(vertical = 4.dp)
             ) {
-                Text(text = "Mesh Receiver", color = Color.White, fontSize = 14.sp)
+                Text(text = "Mesh Receiver", color = Color.Black, fontSize = 14.sp, fontWeight = FontWeight.Medium)
                 Spacer(modifier = Modifier.width(8.dp))
                 Switch(
                     checked = meshStatus.isMeshActive,
@@ -198,19 +331,21 @@ fun MainScreen(
 
             Text(
                 text = "Connected Peers: ${meshStatus.peerCount}",
-                color = if (meshStatus.peerCount > 0) Color(0xFF4CAF50) else Color.Gray,
-                fontSize = 12.sp
+                color = if (meshStatus.peerCount > 0) Color(0xFF4CAF50) else Color.DarkGray,
+                fontSize = 13.sp,
+                fontWeight = FontWeight.Medium
             )
             meshStatus.lastError?.let { error ->
                 Text(
                     text = "Error: $error",
                     color = Color.Red,
-                    fontSize = 10.sp
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold
                 )
             }
         }
 
-        // 2. Button Section (Center)
+        // emergency broadcast buttons
         Column(
             modifier = Modifier.weight(1f),
             verticalArrangement = Arrangement.Center,
@@ -232,16 +367,84 @@ fun MainScreen(
                 onTriggered = onInfoTriggered
             )
         }
+    }
+}
 
-        // 3. Footer Section (Bottom)
-        Button(
-            onClick = onViewLogs,
-            colors = ButtonDefaults.buttonColors(containerColor = Color.DarkGray)
+@Composable
+fun LogsScreen(
+    logs: String,
+    onBack: () -> Unit,
+    onExport: () -> Unit,
+    onClear: () -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(16.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
         ) {
-            Text("View Latency Logs", color = Color.White)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                IconButton(onClick = onBack) {
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                        contentDescription = "Back",
+                        tint = Color.Black
+                    )
+                }
+                Text(
+                    text = "Mesh Network Logs",
+                    fontSize = 18.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = Color.Black
+                )
+            }
+
+            Row {
+                IconButton(onClick = onExport) {
+                    Icon(
+                        imageVector = Icons.Default.Share,
+                        contentDescription = "Export Logs",
+                        tint = Color(0xFF1B5E20)
+                    )
+                }
+                IconButton(onClick = onClear) {
+                    Icon(
+                        imageVector = Icons.Default.Delete,
+                        contentDescription = "Clear Logs",
+                        tint = Color.Red
+                    )
+                }
+            }
         }
 
-        Spacer(modifier = Modifier.height(40.dp))
+        Spacer(modifier = Modifier.height(12.dp))
+
+        Card(
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = Color(0xFF1E1E1E)),
+            shape = RoundedCornerShape(12.dp)
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(16.dp)
+                    .verticalScroll(rememberScrollState())
+            ) {
+                Text(
+                    text = logs,
+                    color = Color(0xFF00FF66),
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 12.sp,
+                    lineHeight = 16.sp
+                )
+            }
+        }
     }
 }
 
@@ -292,16 +495,16 @@ fun HoldToBroadcastButton(
             Text(
                 text = if (holdProgress >= 1f) "SENT!" else text,
                 color = Color.White,
-                fontSize = 18.sp,
-                fontWeight = FontWeight.Bold,
-                lineHeight = 22.sp,
+                fontSize = 24.sp,
+                fontWeight = FontWeight.ExtraBold,
+                lineHeight = 28.sp,
                 textAlign = androidx.compose.ui.text.style.TextAlign.Center
             )
             if (isHolding && holdProgress < 1f) {
                 Spacer(modifier = Modifier.height(8.dp))
                 LinearProgressIndicator(
                     progress = holdProgress,
-                    modifier = Modifier.width(100.dp),
+                    modifier = Modifier.width(140.dp),
                     color = Color.White,
                     trackColor = Color.White.copy(alpha = 0.3f)
                 )
@@ -320,6 +523,6 @@ fun StatusRow(label: String, active: Boolean) {
                 .background(if (active) Color(0xFF4CAF50) else Color.Gray)
         )
         Spacer(modifier = Modifier.width(6.dp))
-        Text(text = label, color = Color.LightGray, fontSize = 12.sp)
+        Text(text = label, color = Color.DarkGray, fontSize = 13.sp, fontWeight = FontWeight.Normal)
     }
 }
