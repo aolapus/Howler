@@ -204,7 +204,7 @@ fun MainApp(
         modifier = Modifier.fillMaxSize(),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        // 1. Top Navigation Bar with Centered Logo & Right Hamburger Menu
+        // navbar
         Box(
             modifier = Modifier
                 .fillMaxWidth()
@@ -220,7 +220,7 @@ fun MainApp(
                     .clip(CircleShape)
             )
 
-            // Right-aligned Hamburger Menu
+            // hamburger menu
             Box(
                 modifier = Modifier
                     .fillMaxHeight()
@@ -267,7 +267,7 @@ fun MainApp(
             }
         }
 
-        // Screen Body Content
+        // body
         when (currentScreen) {
             AppScreen.MAIN -> {
                 MainDashboardScreen(
