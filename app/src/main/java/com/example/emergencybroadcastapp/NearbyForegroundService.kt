@@ -176,6 +176,7 @@ class NearbyForegroundService : Service() {
                 // Ensure Nearby Connections is active when sending a local broadcast
                 triggerNearbyConnectionsLazyLoad()
 
+                val customText = intent.getStringExtra("EXTRA_CUSTOM_MESSAGE")
                 val messageId = UUID.randomUUID().toString().substring(0, 8).uppercase()
                 val type = if (action == "BROADCAST_EMERGENCY") "EMERGENCY_ALERT" else "INFO_NOTIFICATION"
                 val jsonPayload = JSONObject().apply {
@@ -184,6 +185,9 @@ class NearbyForegroundService : Service() {
                     put("originator", localNodeName)
                     put("hops", 0)
                     put("timestamp", System.currentTimeMillis())
+                    if (!customText.isNullOrBlank()) {
+                        put("text", customText)
+                    }
                 }
                 processedMessageIds.add(messageId)
                 broadcastToAll(jsonPayload.toString())
@@ -509,6 +513,7 @@ class NearbyForegroundService : Service() {
             val type = json.optString("type", "EMERGENCY_ALERT")
             val currentHops = json.optInt("hops", 0)
             val originalTimestamp = json.optLong("timestamp", -1L)
+            val customText = if (json.has("text")) json.getString("text") else null
 
             // Ignore if already processed, exceeds 200 hops, or if WE are the originator
             if (processedMessageIds.contains(msgId) || currentHops >= 200 || originator == localNodeName) {
@@ -519,13 +524,13 @@ class NearbyForegroundService : Service() {
             if (originalTimestamp != -1L) {
                 val latency = receiveTime - originalTimestamp
                 Log.d("MeshLatency", "Message $msgId ($type) from $originator received. Hops: $currentHops, Latency: ${latency}ms")
-                saveLatencyLog(msgId, currentHops, latency)
+                saveLatencyLog(msgId, currentHops, latency, type, customText)
                 
                 // TRIGGER ALARM or NOTIFICATION
                 if (type == "EMERGENCY_ALERT") {
-                    triggerEmergencyAlarm(msgId)
+                    triggerEmergencyAlarm(msgId, customText)
                 } else {
-                    showInfoNotification(msgId)
+                    showInfoNotification(msgId, customText)
                 }
             }
 
@@ -541,10 +546,11 @@ class NearbyForegroundService : Service() {
         }
     }
 
-    private fun showInfoNotification(msgId: String) {
+    private fun showInfoNotification(msgId: String, customText: String? = null) {
+        val content = if (!customText.isNullOrBlank()) customText else "A new message was received."
         val notification = NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("New Message")
-            .setContentText("A new message was received.")
+            .setContentTitle("New Mesh Message")
+            .setContentText(content)
             .setSmallIcon(android.R.drawable.stat_notify_chat)
             .setPriority(NotificationCompat.PRIORITY_DEFAULT)
             .setAutoCancel(true)
@@ -553,9 +559,10 @@ class NearbyForegroundService : Service() {
         getSystemService(NotificationManager::class.java)?.notify(msgId.hashCode(), notification)
     }
 
-    private fun saveLatencyLog(msgId: String, hops: Int, latency: Long) {
+    private fun saveLatencyLog(msgId: String, hops: Int, latency: Long, type: String = "EMERGENCY_ALERT", customText: String? = null) {
         try {
-            val logEntry = "ID: $msgId, Hops: $hops, Latency: ${latency}ms, Time: ${System.currentTimeMillis()}\n"
+            val msgTextPart = if (!customText.isNullOrBlank()) ", Msg: \"$customText\"" else ""
+            val logEntry = "ID: $msgId, Type: $type, Hops: $hops, Latency: ${latency}ms$msgTextPart, Time: ${System.currentTimeMillis()}\n"
             val file = File(filesDir, "mesh_latency_log.txt")
             FileOutputStream(file, true).use {
                 it.write(logEntry.toByteArray())
@@ -595,7 +602,7 @@ class NearbyForegroundService : Service() {
     /**
      * Plays audio alarm sound, vibrates device, and posts high-priority emergency notification.
      */
-    private fun triggerEmergencyAlarm(msgId: String) {
+    private fun triggerEmergencyAlarm(msgId: String, customText: String? = null) {
         // 1. Play Alarm Sound
         try {
             val notificationUri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)
@@ -627,9 +634,10 @@ class NearbyForegroundService : Service() {
         }
 
         // 3. Show High-Priority Notification
+        val content = if (!customText.isNullOrBlank()) customText else "An emergency message was received."
         val notification = NotificationCompat.Builder(this, ALERT_CHANNEL_ID)
             .setContentTitle("EMERGENCY ALERT RECEIVED")
-            .setContentText("An emergency message was received.")
+            .setContentText(content)
             .setSmallIcon(android.R.drawable.stat_sys_warning)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setDefaults(Notification.DEFAULT_ALL)
