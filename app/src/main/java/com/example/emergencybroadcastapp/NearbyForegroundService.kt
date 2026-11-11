@@ -1,19 +1,31 @@
 package com.example.emergencybroadcastapp
 
+import android.Manifest
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothManager
+import android.bluetooth.le.AdvertiseCallback
+import android.bluetooth.le.AdvertiseData
+import android.bluetooth.le.AdvertiseSettings
+import android.bluetooth.le.BluetoothLeAdvertiser
+import android.bluetooth.le.BluetoothLeScanner
+import android.bluetooth.le.ScanCallback
+import android.bluetooth.le.ScanFilter
+import android.bluetooth.le.ScanResult
+import android.bluetooth.le.ScanSettings
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.location.LocationManager
 import android.media.RingtoneManager
 import android.os.*
 import android.util.Log
 import androidx.core.app.NotificationCompat
+import androidx.core.content.ContextCompat
 import androidx.core.location.LocationManagerCompat
 import com.google.android.gms.nearby.Nearby
 import com.google.android.gms.nearby.connection.*
@@ -26,6 +38,12 @@ import java.util.UUID
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
+/**
+ * Data class representing the current operational status of the mesh network service.
+ *
+ * This holds simple boolean flags indicating if advertising and discovery are currently
+ * running, how many peers are connected, and any recent error message to display in the UI.
+ */
 data class MeshStatus(
     val isAdvertising: Boolean = false,
     val isDiscovering: Boolean = false,
@@ -34,34 +52,74 @@ data class MeshStatus(
     val lastError: String? = null
 )
 
+/**
+ * NearbyForegroundService handles low-power peer detection and emergency mesh networking.
+ *
+ * LAYMAN EXPLANATION OF HOW THIS WORKS:
+ * 1. Low-Power BLE Pre-Filter (Battery Saving):
+ *    Instead of keeping heavy, battery-draining Google Nearby Connections discovery running 24/7,
+ *    this service broadcasts a lightweight "Howler" Bluetooth beacon (using native Android BLE)
+ *    and listens for matching beacons from other nearby phones running the app.
+ *
+ * 2. Lazy-Loading Nearby Connections:
+ *    When the low-power BLE scanner detects a neighboring Howler beacon, it "wakes up" and lazy-loads
+ *    Google Nearby Connections P2P_CLUSTER mode to perform the high-speed data connection handshake.
+ *
+ * 3. Emergency Payload & Hop-Counting:
+ *    Once connected, emergency alerts or info notifications are transmitted using JSON payloads.
+ *    Each message carries a unique ID, origin timestamp, and a hop counter. Neighbors automatically
+ *    relay the message to their own connected peers while incrementing the hop counter.
+ */
 class NearbyForegroundService : Service() {
 
+    // Unique Service Identifier for Google Nearby Connections
     private val SERVICE_ID = "com.example.emergencybroadcastapp.MESH_ID"
     private val STRATEGY = Strategy.P2P_CLUSTER
     private val CHANNEL_ID = "NearbyServiceChannel"
     private val ALERT_CHANNEL_ID = "EmergencyAlertChannel"
 
+    // Custom BLE Service UUID unique to Howler.
+    // Other phones scan specifically for this UUID to identify Howler peers.
+    private val HOWLER_BLE_SERVICE_UUID = ParcelUuid.fromString("a4d29381-8b43-4e6f-9231-1823908f23a1")
+
+    // Peer tracking sets and local node identification
     private val connectedEndpoints = mutableSetOf<String>()
     private val connectingEndpoints = mutableSetOf<String>()
     private val localNodeName = "Node_" + UUID.randomUUID().toString().substring(0, 4)
+
+    // Low-power BLE Advertiser and Scanner instances
+    private var bleAdvertiser: BluetoothLeAdvertiser? = null
+    private var bleScanner: BluetoothLeScanner? = null
+    private var isBleAdvertising = false
+    private var isBleScanning = false
+
+    // State tracking flag to ensure Nearby Connections is lazy-loaded only once
+    @Volatile
+    private var isNearbyConnectionsActive = false
 
     companion object {
         const val ACTION_START_MESH = "com.example.emergencybroadcastapp.ACTION_START_MESH"
         const val ACTION_STOP_MESH = "com.example.emergencybroadcastapp.ACTION_STOP_MESH"
 
+        // StateFlow exposing real-time service status to the MainActivity UI
         private val _status = MutableStateFlow(MeshStatus())
         val status = _status.asStateFlow()
     }
 
+    /**
+     * Helper method to update the reactive MeshStatus state exposed to the UI.
+     */
     private fun updateStatus(
         isAdvertising: Boolean = _status.value.isAdvertising,
         isDiscovering: Boolean = _status.value.isDiscovering,
-        isMeshActive: Boolean = _status.value.isMeshActive,
+        isMeshActive: Boolean = _status.value.isMeshActive || isBleAdvertising || isBleScanning,
         peerCount: Int = connectedEndpoints.size,
         lastError: String? = null
     ) {
         _status.value = MeshStatus(isAdvertising, isDiscovering, isMeshActive, peerCount, lastError)
     }
+
+    // In-memory set storing up to 1000 recent message IDs to prevent infinite loops and duplicate alerts
     private val processedMessageIds = Collections.newSetFromMap(object : LinkedHashMap<String, Boolean>() {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Boolean>?): Boolean {
             return size > 1000
@@ -72,9 +130,10 @@ class NearbyForegroundService : Service() {
         super.onCreate()
         createNotificationChannel()
 
+        // Create foreground notification required by Android so the operating system does not kill the service
         val notification = createNotification(
             "Howler Active",
-            "Please do not close the app."
+            "Listening for nearby emergency mesh peers..."
         )
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
@@ -87,20 +146,24 @@ class NearbyForegroundService : Service() {
             startForeground(1, notification)
         }
 
-        startAdvertisingAndDiscovery()
+        // Check hardware radios and start low-power BLE pre-filter
         checkRadioStates()
+        startBleAdvertisingAndScanning()
     }
 
+    /**
+     * Verifies if Bluetooth and Location services are enabled on the phone.
+     */
     private fun checkRadioStates() {
-        val bluetoothManager = getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
-        val bluetoothAdapter = bluetoothManager.adapter
+        val bluetoothManager = getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
+        val bluetoothAdapter = bluetoothManager?.adapter
         if (bluetoothAdapter == null || !bluetoothAdapter.isEnabled) {
             Log.e("MeshService", "CRITICAL: Bluetooth is OFF")
             updateStatus(lastError = "Bluetooth is OFF")
         }
 
-        val locationManager = getSystemService(Context.LOCATION_SERVICE) as LocationManager
-        if (!LocationManagerCompat.isLocationEnabled(locationManager)) {
+        val locationManager = getSystemService(Context.LOCATION_SERVICE) as? LocationManager
+        if (locationManager == null || !LocationManagerCompat.isLocationEnabled(locationManager)) {
             Log.e("MeshService", "CRITICAL: Location is OFF")
             updateStatus(lastError = "Location is OFF")
         }
@@ -110,6 +173,9 @@ class NearbyForegroundService : Service() {
         val action = intent?.action
         when (action) {
             "BROADCAST_EMERGENCY", "BROADCAST_NOTIFICATION" -> {
+                // Ensure Nearby Connections is active when sending a local broadcast
+                triggerNearbyConnectionsLazyLoad()
+
                 val messageId = UUID.randomUUID().toString().substring(0, 8).uppercase()
                 val type = if (action == "BROADCAST_EMERGENCY") "EMERGENCY_ALERT" else "INFO_NOTIFICATION"
                 val jsonPayload = JSONObject().apply {
@@ -123,7 +189,7 @@ class NearbyForegroundService : Service() {
                 broadcastToAll(jsonPayload.toString())
             }
             ACTION_START_MESH -> {
-                startAdvertisingAndDiscovery()
+                startBleAdvertisingAndScanning()
             }
             ACTION_STOP_MESH -> {
                 stopMesh()
@@ -132,25 +198,213 @@ class NearbyForegroundService : Service() {
         return START_STICKY
     }
 
+    /**
+     * Starts low-power native Android Bluetooth Low Energy (BLE) Advertising and Scanning.
+     *
+     * LAYMAN EXPLANATION:
+     * This acts as an efficient "radar". It continuously sends out a lightweight Bluetooth signal
+     * containing Howler's unique ID and scans for matching signals from nearby phones.
+     * It uses minimal battery power compared to heavy Wi-Fi/Bluetooth P2P discovery.
+     */
+    private fun startBleAdvertisingAndScanning() {
+        val bluetoothManager = getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
+        val bluetoothAdapter = bluetoothManager?.adapter
+
+        if (bluetoothAdapter == null || !bluetoothAdapter.isEnabled) {
+            Log.w("BleFilter", "Cannot start BLE pre-filter: Bluetooth is disabled.")
+            updateStatus(lastError = "Bluetooth is OFF")
+            return
+        }
+
+        // Verify runtime permissions for Android 12+ (API 31+)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            val hasScanPermission = ContextCompat.checkSelfPermission(
+                this, Manifest.permission.BLUETOOTH_SCAN
+            ) == PackageManager.PERMISSION_GRANTED
+
+            val hasAdvertisePermission = ContextCompat.checkSelfPermission(
+                this, Manifest.permission.BLUETOOTH_ADVERTISE
+            ) == PackageManager.PERMISSION_GRANTED
+
+            if (!hasScanPermission || !hasAdvertisePermission) {
+                Log.w("BleFilter", "BLE permissions missing (BLUETOOTH_SCAN / BLUETOOTH_ADVERTISE).")
+                return
+            }
+        }
+
+        // 1. Start Low-Power BLE Advertiser
+        try {
+            bleAdvertiser = bluetoothAdapter.bluetoothLeAdvertiser
+            if (bleAdvertiser != null && !isBleAdvertising) {
+                val advertiseSettings = AdvertiseSettings.Builder()
+                    .setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_LOW_POWER)
+                    .setTxPowerLevel(AdvertiseSettings.ADVERTISE_TX_POWER_LOW)
+                    .setConnectable(false)
+                    .build()
+
+                val advertiseData = AdvertiseData.Builder()
+                    .setIncludeDeviceName(false)
+                    .addServiceUuid(HOWLER_BLE_SERVICE_UUID)
+                    .build()
+
+                bleAdvertiser?.startAdvertising(advertiseSettings, advertiseData, bleAdvertiseCallback)
+                isBleAdvertising = true
+                Log.d("BleFilter", "Low-power BLE advertiser started.")
+            }
+        } catch (e: Exception) {
+            Log.e("BleFilter", "Failed to start BLE advertiser", e)
+        }
+
+        // 2. Start Low-Power BLE Scanner
+        try {
+            bleScanner = bluetoothAdapter.bluetoothLeScanner
+            if (bleScanner != null && !isBleScanning) {
+                val scanSettings = ScanSettings.Builder()
+                    .setScanMode(ScanSettings.SCAN_MODE_LOW_POWER)
+                    .build()
+
+                // Filter specifically for Howler's custom BLE Service UUID
+                val scanFilter = ScanFilter.Builder()
+                    .setServiceUuid(HOWLER_BLE_SERVICE_UUID)
+                    .build()
+
+                bleScanner?.startScan(listOf(scanFilter), scanSettings, bleScanCallback)
+                isBleScanning = true
+                Log.d("BleFilter", "Low-power BLE scanner started targeting Howler UUID.")
+            }
+        } catch (e: Exception) {
+            Log.e("BleFilter", "Failed to start BLE scanner", e)
+        }
+
+        updateStatus(isMeshActive = true)
+    }
+
+    /**
+     * Stops native BLE advertising and scanning.
+     */
+    private fun stopBleAdvertisingAndScanning() {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                val hasPermission = ContextCompat.checkSelfPermission(
+                    this, Manifest.permission.BLUETOOTH_ADVERTISE
+                ) == PackageManager.PERMISSION_GRANTED
+                if (hasPermission && isBleAdvertising) {
+                    bleAdvertiser?.stopAdvertising(bleAdvertiseCallback)
+                }
+            } else if (isBleAdvertising) {
+                bleAdvertiser?.stopAdvertising(bleAdvertiseCallback)
+            }
+        } catch (e: Exception) {
+            Log.e("BleFilter", "Error stopping BLE advertiser", e)
+        } finally {
+            isBleAdvertising = false
+        }
+
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                val hasPermission = ContextCompat.checkSelfPermission(
+                    this, Manifest.permission.BLUETOOTH_SCAN
+                ) == PackageManager.PERMISSION_GRANTED
+                if (hasPermission && isBleScanning) {
+                    bleScanner?.stopScan(bleScanCallback)
+                }
+            } else if (isBleScanning) {
+                bleScanner?.stopScan(bleScanCallback)
+            }
+        } catch (e: Exception) {
+            Log.e("BleFilter", "Error stopping BLE scanner", e)
+        } finally {
+            isBleScanning = false
+        }
+    }
+
+    /**
+     * Callback listener for native BLE advertising events.
+     */
+    private val bleAdvertiseCallback = object : AdvertiseCallback() {
+        override fun onStartSuccess(settingsInEffect: AdvertiseSettings?) {
+            super.onStartSuccess(settingsInEffect)
+            Log.d("BleFilter", "BLE Advertiser active: Howler beacon broadcasting.")
+        }
+
+        override fun onStartFailure(errorCode: Int) {
+            super.onStartFailure(errorCode)
+            Log.e("BleFilter", "BLE Advertiser failed with error code: $errorCode")
+            isBleAdvertising = false
+        }
+    }
+
+    /**
+     * Callback listener for native BLE scanning events.
+     * When a matching Howler BLE beacon is detected nearby, it triggers lazy-loading of Nearby Connections.
+     */
+    private val bleScanCallback = object : ScanCallback() {
+        override fun onScanResult(callbackType: Int, result: ScanResult?) {
+            super.onScanResult(callbackType, result)
+            if (result != null) {
+                Log.d("BleFilter", "Howler BLE peer signal detected! Triggering lazy load...")
+                triggerNearbyConnectionsLazyLoad()
+            }
+        }
+
+        override fun onBatchScanResults(results: MutableList<ScanResult>?) {
+            super.onBatchScanResults(results)
+            if (!results.isNullOrEmpty()) {
+                Log.d("BleFilter", "Howler BLE peer signals detected in batch scan! Triggering lazy load...")
+                triggerNearbyConnectionsLazyLoad()
+            }
+        }
+
+        override fun onScanFailed(errorCode: Int) {
+            super.onScanFailed(errorCode)
+            Log.e("BleFilter", "BLE Scanner failed with error code: $errorCode")
+            isBleScanning = false
+        }
+    }
+
+    /**
+     * Lazy-loads Google Nearby Connections on demand.
+     *
+     * LAYMAN EXPLANATION:
+     * This function spins up heavy Google Nearby Connections (P2P_CLUSTER) discovery and advertising
+     * ONLY when a Howler peer is detected nearby via native BLE or when an emergency alert is triggered.
+     */
+    @Synchronized
+    private fun triggerNearbyConnectionsLazyLoad() {
+        if (!isNearbyConnectionsActive) {
+            Log.d("MeshService", "Lazy-loading Google Nearby Connections (P2P_CLUSTER)...")
+            isNearbyConnectionsActive = true
+            startAdvertisingAndDiscovery()
+        }
+    }
+
+    /**
+     * Stops all active mesh networking (BLE pre-filter and Google Nearby Connections).
+     */
     private fun stopMesh() {
+        stopBleAdvertisingAndScanning()
         Nearby.getConnectionsClient(this).stopAdvertising()
         Nearby.getConnectionsClient(this).stopDiscovery()
         Nearby.getConnectionsClient(this).stopAllEndpoints()
         connectedEndpoints.clear()
         connectingEndpoints.clear()
-        Log.d("MeshService", "Mesh manually stopped")
+        isNearbyConnectionsActive = false
+        Log.d("MeshService", "Mesh manually stopped.")
         updateStatus(isAdvertising = false, isDiscovering = false, isMeshActive = false)
     }
 
+    /**
+     * Starts Google Nearby Connections Advertising and Discovery.
+     */
     private fun startAdvertisingAndDiscovery() {
         val options = AdvertisingOptions.Builder().setStrategy(STRATEGY).build()
         Nearby.getConnectionsClient(this).startAdvertising(
             localNodeName, SERVICE_ID, connectionLifecycleCallback, options
         ).addOnSuccessListener {
-            Log.d("MeshService", "Advertising started as $localNodeName")
+            Log.d("MeshService", "Nearby Connections Advertising started as $localNodeName")
             updateStatus(isAdvertising = true, isMeshActive = true)
         }.addOnFailureListener { e ->
-            Log.e("MeshService", "Advertising failed to start", e)
+            Log.e("MeshService", "Nearby Connections Advertising failed to start", e)
             updateStatus(isAdvertising = false, lastError = "Adv Fail: ${e.message}")
         }
 
@@ -158,21 +412,23 @@ class NearbyForegroundService : Service() {
         Nearby.getConnectionsClient(this).startDiscovery(
             SERVICE_ID, endpointDiscoveryCallback, discoveryOptions
         ).addOnSuccessListener {
-            Log.d("MeshService", "Discovery started successfully")
+            Log.d("MeshService", "Nearby Connections Discovery started successfully.")
             updateStatus(isDiscovering = true, isMeshActive = true)
         }.addOnFailureListener { e ->
-            Log.e("MeshService", "Discovery failed to start", e)
+            Log.e("MeshService", "Nearby Connections Discovery failed to start", e)
             updateStatus(isDiscovering = false, lastError = "Disc Fail: ${e.message}")
         }
     }
 
+    /**
+     * Callback handling peer discovery events from Google Nearby Connections.
+     */
     private val endpointDiscoveryCallback = object : EndpointDiscoveryCallback() {
         override fun onEndpointFound(endpointId: String, info: DiscoveredEndpointInfo) {
             val remoteName = info.endpointName
             Log.d("MeshService", "Endpoint found: $endpointId ($remoteName)")
             
-            //  Only one node initiates
-            // stops  both nodes from requesting connection at da same ttime
+            // Lexicographical comparison to prevent connection collisions
             val shouldInitiate = localNodeName > remoteName
 
             if (shouldInitiate && !connectedEndpoints.contains(endpointId) && !connectingEndpoints.contains(endpointId)) {
@@ -194,6 +450,9 @@ class NearbyForegroundService : Service() {
         }
     }
 
+    /**
+     * Callback handling connection lifecycle events (initiated, result, disconnected).
+     */
     private val connectionLifecycleCallback = object : ConnectionLifecycleCallback() {
         override fun onConnectionInitiated(endpointId: String, info: ConnectionInfo) {
             Log.d("MeshService", "Connection initiated with $endpointId")
@@ -223,6 +482,9 @@ class NearbyForegroundService : Service() {
         }
     }
 
+    /**
+     * Callback handling incoming byte payloads from connected mesh peers.
+     */
     private val payloadCallback = object : PayloadCallback() {
         override fun onPayloadReceived(endpointId: String, payload: Payload) {
             payload.asBytes()?.let { bytes ->
@@ -234,6 +496,10 @@ class NearbyForegroundService : Service() {
         override fun onPayloadTransferUpdate(endpointId: String, update: PayloadTransferUpdate) {}
     }
 
+    /**
+     * Processes incoming JSON broadcast payloads, records latency, triggers notifications/alarms,
+     * and relays messages to neighboring connected peers.
+     */
     private fun handleIncomingMessage(rawJson: String) {
         val receiveTime = System.currentTimeMillis()
         try {
@@ -266,7 +532,7 @@ class NearbyForegroundService : Service() {
             // Deduplicate: mark as received
             processedMessageIds.add(msgId)
 
-            // Re-broadcast (Hop counter + 1)
+            // Re-broadcast to connected mesh peers (Hop counter + 1)
             json.put("hops", currentHops + 1)
             broadcastToAll(json.toString())
 
@@ -299,6 +565,9 @@ class NearbyForegroundService : Service() {
         }
     }
 
+    /**
+     * Broadcasts data payload bytes to all currently connected mesh endpoints.
+     */
     private fun broadcastToAll(data: String) {
         if (connectedEndpoints.isNotEmpty()) {
             val payload = Payload.fromBytes(data.toByteArray(StandardCharsets.UTF_8))
@@ -316,12 +585,16 @@ class NearbyForegroundService : Service() {
     }
 
     override fun onDestroy() {
+        stopBleAdvertisingAndScanning()
         Nearby.getConnectionsClient(this).stopAdvertising()
         Nearby.getConnectionsClient(this).stopDiscovery()
         Nearby.getConnectionsClient(this).stopAllEndpoints()
         super.onDestroy()
     }
 
+    /**
+     * Plays audio alarm sound, vibrates device, and posts high-priority emergency notification.
+     */
     private fun triggerEmergencyAlarm(msgId: String) {
         // 1. Play Alarm Sound
         try {
