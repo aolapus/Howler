@@ -11,6 +11,7 @@ import java.io.FileOutputStream
 import java.util.UUID
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
@@ -93,12 +94,8 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        enableEdgeToEdge()
         super.onCreate(savedInstanceState)
-
-        // Set top system status bar color to match green header navbar
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-            window.statusBarColor = android.graphics.Color.parseColor("#63AE73")
-        }
 
         if (hasRequiredPermissions()) {
             startForegroundService()
@@ -112,7 +109,7 @@ class MainActivity : ComponentActivity() {
             MaterialTheme {
                 Surface(
                     modifier = Modifier.fillMaxSize(),
-                    color = Color(0xFF63AE73) // Unified status bar & header background green
+                    color = Color(0xFF63AE73)
                 ) {
                     MainApp(
                         onEmergencyTriggered = { customMsg -> triggerEmergencyBroadcast(customMsg) },
@@ -121,7 +118,9 @@ class MainActivity : ComponentActivity() {
                         onReadLogs = { readLogs() },
                         onExportLogs = { exportLogs() },
                         onClearLogs = { clearLogs() },
-                        onSimulateTestAlert = { type, desc -> simulateTestAlert(type, desc) },
+                        onSimulateCustomAlert = { type, msgId, hops, latency, text, timestamp ->
+                            simulateCustomTestAlert(type, msgId, hops, latency, text, timestamp)
+                        },
                         meshStatus = meshStatus,
                         templateManager = templateManager
                     )
@@ -162,15 +161,26 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun simulateTestAlert(type: String, description: String) {
+    private fun simulateCustomTestAlert(
+        type: String,
+        messageId: String,
+        hops: Int,
+        latencyMs: Long,
+        customText: String,
+        timestamp: Long
+    ) {
         try {
-            val messageId = "000000"
-            val logEntry = "ID: $messageId, Type: $type, Hops: 0, Latency: 0ms, Msg: \"$description\", Time: ${System.currentTimeMillis()}\n"
+            val safeId = if (messageId.isBlank()) "000000" else messageId.trim().uppercase()
+            val safeType = if (type.isBlank()) "EMERGENCY_ALERT" else type.trim()
+            val safeText = if (customText.isBlank()) "TEST ALERT" else customText.trim()
+            val safeTime = if (timestamp <= 0L) System.currentTimeMillis() else timestamp
+
+            val logEntry = "ID: $safeId, Type: $safeType, Hops: $hops, Latency: ${latencyMs}ms, Msg: \"$safeText\", Time: $safeTime\n"
             val file = File(filesDir, "mesh_latency_log.txt")
             FileOutputStream(file, true).use {
                 it.write(logEntry.toByteArray())
             }
-            Toast.makeText(this, "Simulated $description added to feed", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "Simulated $safeType added to feed!", Toast.LENGTH_SHORT).show()
         } catch (e: Exception) {
             Toast.makeText(this, "Failed to simulate alert: ${e.message}", Toast.LENGTH_SHORT).show()
         }
@@ -234,7 +244,7 @@ fun MainApp(
     onReadLogs: () -> String,
     onExportLogs: () -> Unit,
     onClearLogs: () -> Unit,
-    onSimulateTestAlert: (type: String, description: String) -> Unit,
+    onSimulateCustomAlert: (type: String, messageId: String, hops: Int, latencyMs: Long, customText: String, timestamp: Long) -> Unit,
     meshStatus: MeshStatus,
     templateManager: TemplateManager
 ) {
@@ -242,6 +252,9 @@ fun MainApp(
     var selectedTab by rememberSaveable { mutableIntStateOf(0) } // 0 = Broadcast, 1 = Feed
     var menuExpanded by remember { mutableStateOf(false) }
     var logsContent by remember { mutableStateOf("") }
+
+    var showSimulationDialog by remember { mutableStateOf(false) }
+    var simulationDialogType by remember { mutableStateOf("EMERGENCY_ALERT") }
 
     val refreshLogs = {
         logsContent = onReadLogs()
@@ -306,7 +319,7 @@ fun MainApp(
                 .padding(bottom = innerPadding.calculateBottomPadding()),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            // Top Navigation Bar Header (Extends green background through the status bar & camera cutout)
+            // Top Navigation Bar Header
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -377,16 +390,16 @@ fun MainApp(
                             text = { Text("Simulate TEST EAB") },
                             onClick = {
                                 menuExpanded = false
-                                onSimulateTestAlert("EMERGENCY_ALERT", "TEST EAB")
-                                refreshLogs()
+                                simulationDialogType = "EMERGENCY_ALERT"
+                                showSimulationDialog = true
                             }
                         )
                         DropdownMenuItem(
                             text = { Text("Simulate TEST RAB") },
                             onClick = {
                                 menuExpanded = false
-                                onSimulateTestAlert("INFO_NOTIFICATION", "TEST RAB")
-                                refreshLogs()
+                                simulationDialogType = "INFO_NOTIFICATION"
+                                showSimulationDialog = true
                             }
                         )
                     }
@@ -431,6 +444,189 @@ fun MainApp(
             }
         }
     }
+
+    // Render Interactive Simulation Configuration Dialog when triggered from Hamburger Menu
+    if (showSimulationDialog) {
+        SimulationConfigDialog(
+            initialType = simulationDialogType,
+            templateManager = templateManager,
+            onDismiss = { showSimulationDialog = false },
+            onInjectSimulation = { type, msgId, hops, latency, text, timestamp ->
+                onSimulateCustomAlert(type, msgId, hops, latency, text, timestamp)
+                refreshLogs()
+            }
+        )
+    }
+}
+
+/**
+ * SimulationConfigDialog provides an interactive form to configure and inject simulated alerts.
+ *
+ * LAYMAN EXPLANATION OF SIMULATION DIALOG:
+ * When you tap "Simulate TEST EAB" or "Simulate TEST RAB" in the hamburger menu, this dialog pops up.
+ * It lets you customize:
+ * 1. Alert Type (Red Emergency vs Green Info Notification)
+ * 2. Message Body text (custom message or one of the 4 saved templates)
+ * 3. Device/Message ID (e.g. "000000" or custom ID)
+ * 4. Hop Count (how many mesh hops the alert has traversed)
+ * 5. Timestamp Offset (lets you test sorting order in the Feed)
+ *
+ * Clicking "Send / Trigger Simulation" writes the customized log line into `mesh_latency_log.txt`
+ * and instantly updates the Broadcast Feed tab.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun SimulationConfigDialog(
+    initialType: String,
+    templateManager: TemplateManager,
+    onDismiss: () -> Unit,
+    onInjectSimulation: (type: String, messageId: String, hops: Int, latencyMs: Long, customText: String, timestamp: Long) -> Unit
+) {
+    var selectedType by remember { mutableStateOf(initialType) } // "EMERGENCY_ALERT" or "INFO_NOTIFICATION"
+    var messageText by remember { mutableStateOf(if (initialType == "EMERGENCY_ALERT") "TEST EAB" else "TEST RAB") }
+    var deviceId by remember { mutableStateOf("000000") }
+    var hopCountText by remember { mutableStateOf("0") }
+    var customTimeText by remember { mutableStateOf("") }
+
+    val templates = remember { templateManager.getTemplates() }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Text(
+                text = "Simulate Mesh Alert",
+                fontWeight = FontWeight.Bold,
+                fontSize = 18.sp
+            )
+        },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState())
+            ) {
+                Text("1. Alert Type:", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 4.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    FilterChip(
+                        selected = selectedType == "EMERGENCY_ALERT",
+                        onClick = { selectedType = "EMERGENCY_ALERT" },
+                        label = { Text("Emergency (EAB)") },
+                        colors = FilterChipDefaults.filterChipColors(
+                            selectedContainerColor = Color(0xFFFFCDD2),
+                            selectedLabelColor = Color(0xFFB71C1C)
+                        )
+                    )
+                    FilterChip(
+                        selected = selectedType == "INFO_NOTIFICATION",
+                        onClick = { selectedType = "INFO_NOTIFICATION" },
+                        label = { Text("Info (RAB)") },
+                        colors = FilterChipDefaults.filterChipColors(
+                            selectedContainerColor = Color(0xFFC8E6C9),
+                            selectedLabelColor = Color(0xFF1B5E20)
+                        )
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(10.dp))
+
+                Text("2. Message Text Body:", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                OutlinedTextField(
+                    value = messageText,
+                    onValueChange = { messageText = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    placeholder = { Text("Enter message text...") }
+                )
+
+                Spacer(modifier = Modifier.height(6.dp))
+
+                Text("Or select saved template:", fontSize = 11.sp, color = Color.Gray)
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 2.dp),
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    (0..3).forEach { index ->
+                        Button(
+                            onClick = { messageText = templates.getOrElse(index) { "" } },
+                            modifier = Modifier.weight(1f),
+                            contentPadding = PaddingValues(2.dp),
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFE0E0E0))
+                        ) {
+                            Text("Q${index + 1}", fontSize = 10.sp, color = Color.Black)
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(10.dp))
+
+                Text("3. Simulated Message ID:", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                OutlinedTextField(
+                    value = deviceId,
+                    onValueChange = { deviceId = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    placeholder = { Text("000000") }
+                )
+
+                Spacer(modifier = Modifier.height(10.dp))
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("4. Hop Count:", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                        OutlinedTextField(
+                            value = hopCountText,
+                            onValueChange = { hopCountText = it },
+                            modifier = Modifier.fillMaxWidth(),
+                            placeholder = { Text("0") }
+                        )
+                    }
+
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("5. Custom Time Offset:", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                        OutlinedTextField(
+                            value = customTimeText,
+                            onValueChange = { customTimeText = it },
+                            modifier = Modifier.fillMaxWidth(),
+                            placeholder = { Text("Default (Now)") }
+                        )
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = {
+                    val hops = hopCountText.toIntOrNull() ?: 0
+                    val customTimestamp = customTimeText.toLongOrNull() ?: System.currentTimeMillis()
+                    onInjectSimulation(
+                        selectedType,
+                        deviceId,
+                        hops,
+                        0L,
+                        messageText,
+                        customTimestamp
+                    )
+                    onDismiss()
+                },
+                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF63AE73))
+            ) {
+                Text("Send / Trigger Simulation", fontWeight = FontWeight.Bold, color = Color.White)
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancel", color = Color.Gray)
+            }
+        }
+    )
 }
 
 @Composable
