@@ -236,13 +236,13 @@ class NearbyForegroundService : Service() {
             }
         }
 
-        // 1. Start Low-Power BLE Advertiser
+        // 1. Start High-Responsiveness BLE Advertiser
         try {
             bleAdvertiser = bluetoothAdapter.bluetoothLeAdvertiser
             if (bleAdvertiser != null && !isBleAdvertising) {
                 val advertiseSettings = AdvertiseSettings.Builder()
-                    .setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_LOW_POWER)
-                    .setTxPowerLevel(AdvertiseSettings.ADVERTISE_TX_POWER_LOW)
+                    .setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_BALANCED) // Broadcasts every 250ms for fast peer detection
+                    .setTxPowerLevel(AdvertiseSettings.ADVERTISE_TX_POWER_MEDIUM)
                     .setConnectable(false)
                     .build()
 
@@ -253,18 +253,18 @@ class NearbyForegroundService : Service() {
 
                 bleAdvertiser?.startAdvertising(advertiseSettings, advertiseData, bleAdvertiseCallback)
                 isBleAdvertising = true
-                Log.d("BleFilter", "Low-power BLE advertiser started.")
+                Log.d("BleFilter", "Balanced BLE advertiser started.")
             }
         } catch (e: Exception) {
             Log.e("BleFilter", "Failed to start BLE advertiser", e)
         }
 
-        // 2. Start Low-Power BLE Scanner
+        // 2. Start High-Responsiveness BLE Scanner
         try {
             bleScanner = bluetoothAdapter.bluetoothLeScanner
             if (bleScanner != null && !isBleScanning) {
                 val scanSettings = ScanSettings.Builder()
-                    .setScanMode(ScanSettings.SCAN_MODE_LOW_POWER)
+                    .setScanMode(ScanSettings.SCAN_MODE_BALANCED) // Fast duty-cycled scan (<1s discovery latency)
                     .build()
 
                 // Filter specifically for Howler's custom BLE Service UUID
@@ -274,7 +274,7 @@ class NearbyForegroundService : Service() {
 
                 bleScanner?.startScan(listOf(scanFilter), scanSettings, bleScanCallback)
                 isBleScanning = true
-                Log.d("BleFilter", "Low-power BLE scanner started targeting Howler UUID.")
+                Log.d("BleFilter", "Balanced BLE scanner started targeting Howler UUID.")
             }
         } catch (e: Exception) {
             Log.e("BleFilter", "Failed to start BLE scanner", e)
@@ -534,11 +534,15 @@ class NearbyForegroundService : Service() {
                 }
             }
 
-            // Deduplicate: mark as received
+            // Deduplicate: mark message ID as processed locally to prevent self-looping
             processedMessageIds.add(msgId)
 
-            // Re-broadcast to connected mesh peers (Hop counter + 1)
-            json.put("hops", currentHops + 1)
+            // INCREMENT HOP COUNT (+1) BEFORE RELAYING TO PEERS:
+            // This ensures that the message forwarded to neighboring devices explicitly carries the increased hop count.
+            val relayedHops = currentHops + 1
+            json.put("hops", relayedHops)
+
+            // Re-broadcast updated JSON payload (with incremented hop count) to connected mesh peers
             broadcastToAll(json.toString())
 
         } catch (e: Exception) {

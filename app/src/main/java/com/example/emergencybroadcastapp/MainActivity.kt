@@ -486,6 +486,7 @@ fun SimulationConfigDialog(
     var messageText by remember { mutableStateOf(if (initialType == "EMERGENCY_ALERT") "TEST EAB" else "TEST RAB") }
     var deviceId by remember { mutableStateOf("000000") }
     var hopCountText by remember { mutableStateOf("0") }
+    var latencyText by remember { mutableStateOf("0") }
     var customTimeText by remember { mutableStateOf("") }
 
     val templates = remember { templateManager.getTemplates() }
@@ -590,27 +591,38 @@ fun SimulationConfigDialog(
                     }
 
                     Column(modifier = Modifier.weight(1f)) {
-                        Text("5. Custom Time Offset:", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                        Text("5. Latency (ms):", fontWeight = FontWeight.Bold, fontSize = 13.sp)
                         OutlinedTextField(
-                            value = customTimeText,
-                            onValueChange = { customTimeText = it },
+                            value = latencyText,
+                            onValueChange = { latencyText = it },
                             modifier = Modifier.fillMaxWidth(),
-                            placeholder = { Text("Default (Now)") }
+                            placeholder = { Text("0") }
                         )
                     }
                 }
+
+                Spacer(modifier = Modifier.height(10.dp))
+
+                Text("6. Custom Time Offset:", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                OutlinedTextField(
+                    value = customTimeText,
+                    onValueChange = { customTimeText = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    placeholder = { Text("Default (Now)") }
+                )
             }
         },
         confirmButton = {
             Button(
                 onClick = {
                     val hops = hopCountText.toIntOrNull() ?: 0
+                    val latency = latencyText.toLongOrNull() ?: 0L
                     val customTimestamp = customTimeText.toLongOrNull() ?: System.currentTimeMillis()
                     onInjectSimulation(
                         selectedType,
                         deviceId,
                         hops,
-                        0L,
+                        latency,
                         messageText,
                         customTimestamp
                     )
